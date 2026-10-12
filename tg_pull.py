@@ -3,7 +3,9 @@ import asyncio
 import builtins
 import json
 import os
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 from telethon import TelegramClient
@@ -22,7 +24,7 @@ def print(*a, **k):
 # ─── CONFIG (env-injected) ───────────────────────────────
 API_ID         = int(os.environ.get("TG_API_ID", "30321244"))
 API_HASH       = os.environ.get("TG_API_HASH", "4a877e997290766381a388f081cbefc9")
-STRING_SESSION = os.environ["TG_STRING_SESSION"]           # required
+STRING_SESSION = os.environ["TG_STRING_SESSION"]
 SOURCE         = os.environ.get("TG_SOURCE", "https://t.me/PaniKomadu")
 
 STATE          = Path("state/pull_state.json")
@@ -32,7 +34,10 @@ DL_DIR         = Path("_downloads"); DL_DIR.mkdir(exist_ok=True)
 UPLOAD_TO_SAVED = True
 VIDEO_NOTES     = False
 LIMIT           = 0
-SCAN_LOG_EVERY  = 50
+
+SCAN_LOG_EVERY  = 50                  # print scan progress every N messages
+MAX_RUNTIME_SEC = int(5.5 * 3600)     # 5h 30m — exit cleanly before GitHub's 6h kill
+COMMIT_EVERY    = 20                  # git push state every N moved videos (0 = disable)
 # ─────────────────────────────────────────────────────────
 
 client = TelegramClient(StringSession(STRING_SESSION), API_ID, API_HASH)
@@ -46,6 +51,24 @@ def load_state():
 
 def save_state(s):
     STATE.write_text(json.dumps(s))
+
+
+def git_checkpoint(moved):
+    """Commit + push state file so a mid-job crash still preserves progress."""
+    if not COMMIT_EVERY or moved == 0 or moved % COMMIT_EVERY != 0:
+        return
+    try:
+        subprocess.run(["git", "add", "state/pull_state.json"], check=True)
+        subprocess.run(
+            ["git", "-c", "user.name=gh-bot",
+             "-c", "user.email=gh-bot@users.noreply.github.com",
+             "commit", "-m", f"chore: state checkpoint @ moved={moved} [skip ci]"],
+            check=True,
+        )
+        subprocess.run(["git", "push"], check=True)
+        print(f"[git] checkpoint committed @ moved={moved}")
+    except subprocess.CalledProcessError as e:
+        print(f"[git] checkpoint skipped: {e}")
 
 
 def _is_round_video(doc):
@@ -77,6 +100,7 @@ async def ensure_joined(entity):
 async def main():
     await client.start()
     state = load_state()
+    start_ts = time.time()
 
     try:
         entity = await client.get_entity(SOURCE)
@@ -93,14 +117,21 @@ async def main():
     last_seen_id = state["last_id"]
 
     print(f"[~] resume point: msg_id > {state['last_id']}  |  already done: {len(state['done'])}")
+    print(f"[~] runtime cap: {MAX_RUNTIME_SEC/3600:.1f}h  |  checkpoint every {COMMIT_EVERY} videos")
     print(f"[~] scanning...")
 
     async for msg in client.iter_messages(entity, min_id=state["last_id"], reverse=True):
+        # runtime guard — exit cleanly before GitHub's 6h kill
+        if time.time() - start_ts > MAX_RUNTIME_SEC:
+            print(f"[~] runtime limit reached ({MAX_RUNTIME_SEC/3600:.1f}h) — exiting cleanly")
+            break
+
         scanned += 1
         last_seen_id = msg.id
 
         if scanned % SCAN_LOG_EVERY == 0:
-            print(f"[scan] seen {scanned}  |  videos found: {found}  |  moved: {moved}  |  last_id: {msg.id}")
+            elapsed = int(time.time() - start_ts)
+            print(f"[scan] seen {scanned}  |  found: {found}  |  moved: {moved}  |  last_id: {msg.id}  |  elapsed: {elapsed}s")
 
         if not is_plain_video(msg):
             continue
@@ -138,6 +169,8 @@ async def main():
                 except OSError: pass
 
             moved += 1
+            git_checkpoint(moved)
+
             if LIMIT and moved >= LIMIT:
                 break
 
@@ -147,14 +180,16 @@ async def main():
         except Exception as e:
             print(f"[!] {msg.id}: {e}")
 
-    # save state even if nothing moved
+    # final state save (in case loop exited before any move)
     save_state(state)
 
+    elapsed = int(time.time() - start_ts)
     print(f"[✓] done")
     print(f"    scanned: {scanned}")
     print(f"    videos found: {found}")
     print(f"    moved to Saved Messages: {moved}")
     print(f"    last_id: {last_seen_id}")
+    print(f"    elapsed: {elapsed}s")
 
 
 with client:
