@@ -1,0 +1,5 @@
+_downloads/
+downloads/
+*.session
+*.session-journal
+__pycache__/
