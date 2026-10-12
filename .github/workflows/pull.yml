@@ -1,0 +1,43 @@
+name: Telegram Pull
+
+on:
+  workflow_dispatch:          # manual trigger from Actions tab
+  # schedule:
+  #   - cron: '0 */8 * * *'   # optional: every 8 hours
+
+jobs:
+  pull:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350      # under GitHub's 6h cap
+
+    permissions:
+      contents: write         # needed to commit state back
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps
+        run: pip install telethon
+
+      - name: Run puller
+        env:
+          TG_API_ID:         ${{ secrets.TG_API_ID }}
+          TG_API_HASH:       ${{ secrets.TG_API_HASH }}
+          TG_STRING_SESSION: ${{ secrets.TG_STRING_SESSION }}
+          TG_SOURCE:         ${{ secrets.TG_SOURCE }}
+        run: python -u tg_pull.py
+
+      - name: Commit state back
+        if: always()
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore: update pull state [skip ci]"
+          file_pattern: "state/pull_state.json"
+          commit_user_name: "github-actions[bot]"
+          commit_user_email: "github-actions[bot]@users.noreply.github.com"
